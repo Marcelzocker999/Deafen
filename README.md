@@ -2,7 +2,9 @@
 
 Deafen automatically mutes selected Windows applications while their windows are minimized or in the background, then restores their previous audio mute state when they become active again. It is a useful solution for games that do not provide their own setting to mute audio when unfocused.
 
-![Deafen application screenshot](screenshot.png)
+<p align="center">
+  <img src="screenshot.png" alt="Deafen application screenshot" width="680">
+</p>
 
 ## How it works
 
