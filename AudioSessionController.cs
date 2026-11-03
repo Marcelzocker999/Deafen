@@ -6,52 +6,126 @@ namespace Deafen
 {
     public static class AudioSessionController
     {
-        private static readonly Dictionary<string, bool> OriginalMuteStates =
-            new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<SessionNotificationRegistration> SessionNotificationRegistrations =
+            new List<SessionNotificationRegistration>();
 
-        public static void Apply(HashSet<int> minimizedProcessIds)
+        public static event Action SessionCreated;
+
+        public static void StartSessionNotifications()
         {
-            if (minimizedProcessIds == null)
-                throw new ArgumentNullException("minimizedProcessIds");
+            StopSessionNotifications();
+
+            IMMDeviceEnumerator deviceEnumerator = null;
+            IMMDeviceCollection devices = null;
+            try
+            {
+                deviceEnumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                devices = deviceEnumerator.EnumAudioEndpoints(EDataFlow.Render, DeviceState.Active);
+                uint deviceCount;
+                devices.GetCount(out deviceCount);
+
+                for (uint deviceIndex = 0; deviceIndex < deviceCount; deviceIndex++)
+                {
+                    IMMDevice device = null;
+                    object managerObject = null;
+                    SessionCreatedNotification notification = null;
+                    bool registered = false;
+                    try
+                    {
+                        devices.GetItem(deviceIndex, out device);
+                        Guid managerId = typeof(IAudioSessionManager2).GUID;
+                        device.Activate(ref managerId, 23, IntPtr.Zero, out managerObject);
+                        IAudioSessionManager2 manager = (IAudioSessionManager2)managerObject;
+                        notification = new SessionCreatedNotification();
+                        manager.RegisterSessionNotification(notification);
+
+                        SessionNotificationRegistrations.Add(new SessionNotificationRegistration
+                        {
+                            Manager = manager,
+                            Notification = notification
+                        });
+                        registered = true;
+                        managerObject = null;
+                    }
+                    finally
+                    {
+                        if (!registered)
+                            Release(managerObject);
+                        Release(device);
+                    }
+                }
+
+                if (SessionNotificationRegistrations.Count == 0)
+                    throw new InvalidOperationException("No active audio output device accepted session notifications.");
+            }
+            catch
+            {
+                StopSessionNotifications();
+                throw;
+            }
+            finally
+            {
+                Release(devices);
+                Release(deviceEnumerator);
+            }
+        }
+
+        public static void StopSessionNotifications()
+        {
+            Exception firstException = null;
+            foreach (SessionNotificationRegistration registration in SessionNotificationRegistrations)
+            {
+                try
+                {
+                    registration.Manager.UnregisterSessionNotification(registration.Notification);
+                }
+                catch (Exception exception)
+                {
+                    if (firstException == null)
+                        firstException = exception;
+                }
+                finally
+                {
+                    Release(registration.Manager);
+                }
+            }
+
+            SessionNotificationRegistrations.Clear();
+            if (firstException != null)
+                throw firstException;
+        }
+
+        private static void NotifySessionCreated()
+        {
+            Action handler = SessionCreated;
+            if (handler != null)
+                handler();
+        }
+
+        public static void Apply(HashSet<int> mutedProcessIds, HashSet<int> trackedProcessIds)
+        {
+            if (mutedProcessIds == null)
+                throw new ArgumentNullException("mutedProcessIds");
+            if (trackedProcessIds == null)
+                throw new ArgumentNullException("trackedProcessIds");
 
             List<AudioSession> sessions = GetSessions();
-            HashSet<string> liveSessionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Guid eventContext = Guid.Empty;
 
             try
             {
                 foreach (AudioSession session in sessions)
                 {
-                    liveSessionIds.Add(session.Id);
-                    bool shouldMute = minimizedProcessIds.Contains(unchecked((int)session.ProcessId));
-                    bool originalMute;
-
-                    if (shouldMute)
+                    int processId = unchecked((int)session.ProcessId);
+                    if (trackedProcessIds.Contains(processId))
                     {
-                        if (!OriginalMuteStates.TryGetValue(session.Id, out originalMute))
-                        {
-                            session.Volume.GetMute(out originalMute);
-                            OriginalMuteStates.Add(session.Id, originalMute);
-                        }
-
-                        session.Volume.SetMute(true, ref eventContext);
-                    }
-                    else if (OriginalMuteStates.TryGetValue(session.Id, out originalMute))
-                    {
-                        session.Volume.SetMute(originalMute, ref eventContext);
-                        OriginalMuteStates.Remove(session.Id);
+                        bool currentMute;
+                        session.Volume.GetMute(out currentMute);
+                        bool shouldMute = mutedProcessIds.Contains(processId);
+                        if (currentMute != shouldMute)
+                            session.Volume.SetMute(shouldMute, ref eventContext);
                     }
                 }
-
-                List<string> endedSessions = new List<string>();
-                foreach (string sessionId in OriginalMuteStates.Keys)
-                {
-                    if (!liveSessionIds.Contains(sessionId))
-                        endedSessions.Add(sessionId);
-                }
-
-                foreach (string sessionId in endedSessions)
-                    OriginalMuteStates.Remove(sessionId);
             }
             finally
             {
@@ -164,6 +238,23 @@ namespace Deafen
             public ISimpleAudioVolume Volume;
         }
 
+        private sealed class SessionNotificationRegistration
+        {
+            public IAudioSessionManager2 Manager;
+            public SessionCreatedNotification Notification;
+        }
+
+        [ComVisible(true)]
+        [ClassInterface(ClassInterfaceType.None)]
+        private sealed class SessionCreatedNotification : IAudioSessionNotification
+        {
+            public int OnSessionCreated(IAudioSessionControl newSession)
+            {
+                NotifySessionCreated();
+                return 0;
+            }
+        }
+
         [DllImport("user32.dll")]
         public static extern bool IsIconic(IntPtr windowHandle);
 
@@ -241,6 +332,17 @@ namespace Deafen
             void GetSimpleAudioVolume(ref Guid sessionGuid, uint streamFlags, out IntPtr audioVolume);
             [return: MarshalAs(UnmanagedType.Interface)]
             IAudioSessionEnumerator GetSessionEnumerator();
+            void RegisterSessionNotification(IAudioSessionNotification notification);
+            void UnregisterSessionNotification(IAudioSessionNotification notification);
+        }
+
+        [ComVisible(true)]
+        [Guid("641DD20B-4D41-49CC-ABA3-174B9477BB08")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IAudioSessionNotification
+        {
+            [PreserveSig]
+            int OnSessionCreated([MarshalAs(UnmanagedType.Interface)] IAudioSessionControl newSession);
         }
 
         [ComImport]

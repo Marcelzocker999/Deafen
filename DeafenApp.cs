@@ -1006,11 +1006,15 @@ namespace Deafen
         private static readonly Color TextColor = Color.FromArgb(232, 238, 248);
         private static readonly Color MutedTextColor = Color.FromArgb(142, 155, 177);
         private readonly string _configPath = Path.Combine(
-            Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Deafen",
             "Deafen.json");
         private readonly string _legacyConfigPath = Path.Combine(
             Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
             "processes.json");
+        private readonly string _legacyConfigPathBesideExecutable = Path.Combine(
+            Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+            "Deafen.json");
         private readonly List<string> _processNames = new List<string>();
         private readonly Timer _timer = new Timer();
         private readonly Panel _processCard = new Panel();
@@ -1072,6 +1076,21 @@ namespace Deafen
             Shown += delegate
             {
                 InstallWindowEventHooks();
+                AudioSessionController.SessionCreated += HandleAudioSessionCreated;
+                try
+                {
+                    AudioSessionController.StartSessionNotifications();
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        "Deafen could not enable immediate audio-session detection. It will continue checking every 2 seconds.\r\n\r\n" +
+                        exception.Message,
+                        "Deafen",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+
                 TryRefreshRunningProcesses();
                 RefreshAudioState();
                 _timer.Start();
@@ -1138,6 +1157,16 @@ namespace Deafen
                 return;
             }
 
+            QueueAudioRefresh();
+        }
+
+        private void HandleAudioSessionCreated()
+        {
+            QueueAudioRefresh();
+        }
+
+        private void QueueAudioRefresh()
+        {
             if (_audioRefreshPending || IsDisposed || !IsHandleCreated)
                 return;
 
@@ -1174,30 +1203,35 @@ namespace Deafen
 
         private void LoadSettings()
         {
-            if (!File.Exists(_configPath))
+            if (File.Exists(_configPath))
             {
-                bool importingLegacySettings = File.Exists(_legacyConfigPath);
-                if (!importingLegacySettings)
-                {
-                    SaveSettings();
-                    return;
-                }
-
-                AppSettings legacySettings = DeserializeSettings(
-                    File.ReadAllText(_legacyConfigPath),
-                    Path.GetFileName(_legacyConfigPath));
-                LoadProcessNames(legacySettings, true);
-                MinimizeToTrayOnClose = legacySettings.MinimizeToTray ?? true;
-                SaveSettings();
-                File.Delete(_legacyConfigPath);
+                AppSettings settings = DeserializeSettings(
+                    File.ReadAllText(_configPath),
+                    Path.GetFileName(_configPath));
+                LoadProcessNames(settings, false);
+                MinimizeToTrayOnClose = settings.MinimizeToTray ?? true;
                 return;
             }
 
-            AppSettings settings = DeserializeSettings(
-                File.ReadAllText(_configPath),
-                Path.GetFileName(_configPath));
-            LoadProcessNames(settings, false);
-            MinimizeToTrayOnClose = settings.MinimizeToTray ?? true;
+            string migrationSource = File.Exists(_legacyConfigPathBesideExecutable)
+                ? _legacyConfigPathBesideExecutable
+                : File.Exists(_legacyConfigPath) ? _legacyConfigPath : null;
+
+            if (migrationSource == null)
+            {
+                SaveSettings();
+                return;
+            }
+
+            AppSettings legacySettings = DeserializeSettings(
+                File.ReadAllText(migrationSource),
+                Path.GetFileName(migrationSource));
+            LoadProcessNames(legacySettings, String.Equals(
+                migrationSource,
+                _legacyConfigPath,
+                StringComparison.OrdinalIgnoreCase));
+            MinimizeToTrayOnClose = legacySettings.MinimizeToTray ?? true;
+            SaveSettings();
         }
 
         private static AppSettings DeserializeSettings(string json, string fileName)
@@ -1240,6 +1274,7 @@ namespace Deafen
 
             try
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(_configPath));
                 string json = new JavaScriptSerializer().Serialize(settings);
                 File.WriteAllText(temporaryPath, json + Environment.NewLine, new System.Text.UTF8Encoding(false));
 
@@ -2078,6 +2113,8 @@ namespace Deafen
                 if (index < 0)
                     return;
 
+                HashSet<int> removedProcessIds = GetProcessIds(name);
+                AudioSessionController.Apply(new HashSet<int>(), removedProcessIds);
                 _processNames.RemoveAt(index);
                 try
                 {
@@ -2108,10 +2145,11 @@ namespace Deafen
                 return;
 
             _isRefreshing = true;
+            HashSet<int> mutedProcessIds = new HashSet<int>();
+            HashSet<int> trackedProcessIds = new HashSet<int>();
             try
             {
                 int foregroundProcessId = AudioSessionController.GetForegroundProcessId();
-                HashSet<int> mutedProcessIds = new HashSet<int>();
                 Dictionary<string, string> desiredStatuses =
                     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (string name in _processNames)
@@ -2127,6 +2165,7 @@ namespace Deafen
                         {
                             try
                             {
+                                trackedProcessIds.Add(process.Id);
                                 IntPtr windowHandle = process.MainWindowHandle;
                                 if (windowHandle == IntPtr.Zero)
                                     continue;
@@ -2168,7 +2207,7 @@ namespace Deafen
                     desiredStatuses[name] = status;
                 }
 
-                AudioSessionController.Apply(mutedProcessIds);
+                AudioSessionController.Apply(mutedProcessIds, trackedProcessIds);
                 UpdateProcessList(desiredStatuses);
                 _monitoringErrorShown = false;
             }
@@ -2178,11 +2217,11 @@ namespace Deafen
 
                 try
                 {
-                    AudioSessionController.Apply(new HashSet<int>());
+                    AudioSessionController.Apply(new HashSet<int>(), trackedProcessIds);
                 }
                 catch (Exception restoreException)
                 {
-                    errorMessage += "\r\nCould not restore audio: " + restoreException.Message;
+                    errorMessage += "\r\nCould not enable tracked application audio: " + restoreException.Message;
                 }
 
                 if (!_monitoringErrorShown)
@@ -2317,18 +2356,63 @@ namespace Deafen
 
             _timer.Stop();
             StopWindowEventHooks();
+            AudioSessionController.SessionCreated -= HandleAudioSessionCreated;
+            string shutdownError = null;
             try
             {
-                AudioSessionController.Apply(new HashSet<int>());
+                AudioSessionController.StopSessionNotifications();
             }
             catch (Exception exception)
             {
-                MessageBox.Show(
-                    "Could not restore the original audio state:\r\n" + exception.Message,
-                    "Deafen",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                shutdownError = "Could not stop audio-session notifications:\r\n" + exception.Message;
             }
+
+            try
+            {
+                AudioSessionController.Apply(new HashSet<int>(), GetTrackedProcessIds());
+            }
+            catch (Exception exception)
+            {
+                string audioError = "Could not enable audio for tracked applications:\r\n" + exception.Message;
+                shutdownError = shutdownError == null
+                    ? audioError
+                    : shutdownError + "\r\n\r\n" + audioError;
+            }
+
+            if (shutdownError != null)
+                MessageBox.Show(shutdownError, "Deafen", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private HashSet<int> GetTrackedProcessIds()
+        {
+            HashSet<int> processIds = new HashSet<int>();
+            foreach (string name in _processNames)
+                processIds.UnionWith(GetProcessIds(name));
+            return processIds;
+        }
+
+        private static HashSet<int> GetProcessIds(string processName)
+        {
+            HashSet<int> processIds = new HashSet<int>();
+            Process[] processes = Process.GetProcessesByName(processName);
+            foreach (Process process in processes)
+            {
+                using (process)
+                {
+                    try
+                    {
+                        processIds.Add(process.Id);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+                    catch (Win32Exception)
+                    {
+                    }
+                }
+            }
+
+            return processIds;
         }
 
         private void HandleFormClosed(object sender, FormClosedEventArgs args)

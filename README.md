@@ -1,6 +1,6 @@
 # Deafen
 
-Deafen automatically mutes selected Windows applications while their windows are minimized or in the background, then restores their previous audio mute state when they become active again. It is a useful solution for games that do not provide their own setting to mute audio when unfocused.
+Deafen automatically mutes selected Windows applications while their windows are minimized or in the background, then unmutes them when they become active again. It is a useful solution for games that do not provide their own setting to mute audio when unfocused.
 
 **Download:** [Latest release](https://github.com/Marcelzocker999/Deafen/releases/latest)
 
@@ -13,15 +13,16 @@ Deafen automatically mutes selected Windows applications while their windows are
 - Tracks applications by executable name.
 - Detects minimized windows and foreground-window changes, including borderless applications.
 - Applies mute state per Windows audio session without changing volume.
-- Remembers and restores each audio session's original mute state.
-- Uses Windows accessibility events for prompt updates and a periodic check to discover new processes and audio sessions.
+- Sets tracked applications to muted while minimized or out of focus and unmuted while active.
+- Unmutes tracked applications when Deafen exits.
+- Uses Windows accessibility and audio-session notifications for prompt updates, with a periodic fallback check.
 - Does not mute a tracked process when it has no detectable application window.
 
 ## Manage tracked applications
 
 Add an application from the **Running apps** list, or use **Add by name** to enter an executable name such as `notepad.exe`. The running-app list is refreshed when opened and groups multiple windows belonging to the same executable. Select **Delete** beside an entry to stop tracking it.
 
-The tracked-process list is empty on a fresh installation. Deafen creates a `Deafen.json` settings file beside the executable and saves changes as they are made. Process names can be entered with or without the `.exe` extension; use a name, not a full file path.
+The tracked-process list is empty on a fresh installation. Deafen saves settings to `%APPDATA%\Deafen\Deafen.json`, so they remain writable even when the application is installed in a protected folder. Existing settings beside the executable or in `processes.json` are imported automatically the first time the updated version starts. Process names can be entered with or without the `.exe` extension; use a name, not a full file path.
 
 Example configuration:
 
@@ -36,7 +37,7 @@ Example configuration:
 
 - **Start with Windows** launches Deafen when the current user signs in.
 - **Minimize to tray on close** keeps Deafen running when its window is closed.
-- Select **Open** in the tray menu to show the window, or **Exit** to stop monitoring and restore audio states.
+- Select **Open** in the tray menu to show the window, or **Exit** to stop monitoring and unmute tracked applications.
 - Only one Deafen instance runs at a time. Launching it again brings the existing window forward.
 
 ## Build from source
